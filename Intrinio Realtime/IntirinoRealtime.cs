@@ -2,17 +2,19 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
-using WebSocketSharp;
+using System.Net.WebSockets;
 using System.Threading.Tasks;
 using System.Reactive;
 using System.Reactive.Linq;
+using System.Threading;
+using System.Net;
 
 namespace Intrinio_Realtime
 {
     public class IntrinioRealtime : IDisposable
     {
-        event Action<Exception> OnError;
-        event Action<Quote> OnQuote;
+        event EventHandler<Exception> OnError;
+        event EventHandler<Quote> OnQuote;
         public static TimeSpan TOKEN_EXPIRATION_INTERVAL = TimeSpan.FromDays(7);
         public static TimeSpan HEARTBEAT_INTERVAL = TimeSpan.FromSeconds(20);
         public static TimeSpan[] SELF_HEAL_BACKOFFS = { TimeSpan.FromMilliseconds(0), TimeSpan.FromMilliseconds(100), TimeSpan.FromMilliseconds(500), TimeSpan.FromMilliseconds(1000), TimeSpan.FromMilliseconds(2000), TimeSpan.FromMilliseconds(5000) };
@@ -20,9 +22,10 @@ namespace Intrinio_Realtime
         public static string HOST = "realtime.intrinio.com";
         public static int PORT = 443;
         public static string WS_PROTOCOL = "wss";
+        const int bufferSize = 0xff;
 
         protected string token;
-        protected WebSocket websocket;
+        protected ClientWebSocket websocket;
         protected Dictionary<string, bool> channels = new Dictionary<string, bool>();
         protected IList<TimeSpan> selfHealBackoffs = new List<TimeSpan>(SELF_HEAL_BACKOFFS);
         protected System.Timers.Timer selfHealTimer;
@@ -38,6 +41,11 @@ namespace Intrinio_Realtime
 
         public IntrinioRealtime(Options options)
         {
+            ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls
+        | SecurityProtocolType.Tls11
+        | SecurityProtocolType.Tls12
+        | SecurityProtocolType.Ssl3;
+
             this.options = options;
 
             connect();
@@ -45,67 +53,66 @@ namespace Intrinio_Realtime
             tokenExpirationTimer = new System.Timers.Timer(TOKEN_EXPIRATION_INTERVAL.TotalMilliseconds);
             tokenExpirationTimer.Elapsed += (t, e) => connect();
             tokenExpirationTimer.AutoReset = true;
+            tokenExpirationTimer.Start();
 
 
             heartbeatTimer = new System.Timers.Timer(HEARTBEAT_INTERVAL.TotalMilliseconds);
             heartbeatTimer.Elapsed += (t, e) => heartbeat();
             heartbeatTimer.AutoReset = true;
+            tokenExpirationTimer.Start();
         }
 
-        protected void connect(bool rejoin = false)
+        protected async void connect(bool rejoin = false)
         {
             this.debug("Connecting...");
 
             try
             {
-                lock (this.connectionLock)
+                await refreshToken();
+                await refreshWebsocket();
+                if (rejoin)
                 {
-                    refreshToken();
-                    refreshWebsocket();
+                    stopSelfHeal();
                 }
+                await rejoinChannels();
             }
-            catch
+            catch (Exception e)
             {
+                error(e, false);
                 trySelfHeal();
-            }
-
-            if (rejoin)
-            {
-                stopSelfHeal();
-                rejoinChannels();
             }
 
         }
 
-        protected async void refreshToken()
+        protected async Task refreshToken()
         {
             debug("Requesting auth token...");
             try
             {
-                using (var client = new System.Net.Http.HttpClient())
+                var client = new System.Net.Http.HttpClient();
+
+                var uriBuilder = new UriBuilder(Uri.UriSchemeHttps, HOST, PORT, "auth");
+                var request = new System.Net.Http.HttpRequestMessage(System.Net.Http.HttpMethod.Get, uriBuilder.Uri);
+                request.Headers.Authorization = getAuthenticationHeader();
+                request.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
+
+                var response = await client.SendAsync(request);
+
+                if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized)
                 {
-                    var uriBuilder = new UriBuilder(Uri.UriSchemeHttps, HOST, PORT, "auth");
-                    var request = new System.Net.Http.HttpRequestMessage(System.Net.Http.HttpMethod.Get, uriBuilder.Uri);
-                    request.Headers.Authorization = getAuthenticationHeader();
-                    request.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
-
-                    var response = await client.SendAsync(request);
-
-                    if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized)
-                    {
-                        throw new IntrinioRealtimeAuthorizationException();
-                    }
-                    else if (!response.IsSuccessStatusCode)
-                    {
-                        throw new IntrinioRealtimeAuthorizationException($"Could not get auth token: Status code { Enum.GetName(typeof(System.Net.HttpStatusCode), response.StatusCode)}");
-                    }
-                    else
-                    {
-                        this.token = Encoding.UTF8.GetString(Convert.FromBase64String(await response.Content.ReadAsStringAsync()));
-                        this.debug("Received auth token!");
-                    }
-
+                    throw new IntrinioRealtimeAuthorizationException();
                 }
+                else if (!response.IsSuccessStatusCode)
+                {
+                    throw new IntrinioRealtimeAuthorizationException($"Could not get auth token: Status code { Enum.GetName(typeof(System.Net.HttpStatusCode), response.StatusCode)}");
+                }
+                else
+                {
+                    this.token = await response.Content.ReadAsStringAsync();
+                    this.debug("Received auth token!");
+                }
+
+                client.Dispose();
             }
             catch (Exception e)
             {
@@ -113,56 +120,77 @@ namespace Intrinio_Realtime
             }
         }
 
-        protected void refreshWebsocket()
+        protected async Task refreshWebsocket()
         {
             this.debug("Establishing websocket...");
 
 
             if (this.websocket != null)
             {
-                this.websocket.Close(WS_CLOSE_REASON_USER, "User terminated");
+                await this.websocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "User terminated", CancellationToken.None);
             }
 
             var uriBuilder = new UriBuilder(WS_PROTOCOL, HOST, PORT, "/socket/websocket");
             uriBuilder.Query = $"vsn=1.0.0&token={Uri.EscapeDataString(this.token)}";
-            this.websocket = new WebSocket(uriBuilder.ToString());
+            this.websocket = new ClientWebSocket();
 
-            websocket.OnClose += (sender, e) =>
-            {
-                this.connected = true;
-                debug("Websocket closed!");
-
-                if (e.Code != WS_CLOSE_REASON_USER)
-                {
-                    trySelfHeal();
-                }
-            };
-
-
-            this.websocket.OnError += (sender, e) =>
-            {
-                Console.Error.WriteLine("IntrinioRealtime | Websocket error: " + e);
-            };
-
-            this.websocket.OnMessage += (sender, e) =>
-            {
-                IntrinioMessage<Quote> message = Newtonsoft.Json.JsonConvert.DeserializeObject<IntrinioMessage<Quote>>(e.Data);
-                if (message.Event == IntrinioMessage<Quote>.MessageType.QUOTE)
-                {
-                    var quote = message.Payload;
-                    OnQuote.DynamicInvoke(quote);
-                    debug("Quote: ", quote);
-                }
-                else
-                {
-                    debug("Non-quote message: ", e.Data);
-                }
-
-            };
-
-            this.websocket.Connect();
-            this.connected = true;
+            await this.websocket.ConnectAsync(uriBuilder.Uri, CancellationToken.None);
             this.debug("Websocket connected!");
+            this.recieveMessages();
+        }
+
+        protected async void recieveMessages()
+        {
+            try
+            {
+                var buffer = new byte[bufferSize];
+                while (this.websocket.State == WebSocketState.Open)
+                {
+                    WebSocketReceiveResult result;
+                    var stringResult = new StringBuilder();
+                    do
+                    {
+                        result = await websocket.ReceiveAsync(new ArraySegment<byte>(buffer), CancellationToken.None);
+
+                        if (result.MessageType == WebSocketMessageType.Close)
+                        {
+                            await websocket.CloseAsync(WebSocketCloseStatus.NormalClosure, string.Empty, CancellationToken.None);
+                            this.connected = false;
+                        }
+                        else
+                        {
+                            var str = Encoding.UTF8.GetString(buffer, 0, result.Count);
+                            stringResult.Append(str);
+                        }
+
+                    } while (!result.EndOfMessage);
+
+                    IntrinioMessage<Quote> message = Newtonsoft.Json.JsonConvert.DeserializeObject<IntrinioMessage<Quote>>(stringResult.ToString());
+                    if (message.Event == IntrinioMessage<Quote>.MessageType.QUOTE)
+                    {
+                        var quote = message.Payload;
+                        if (OnQuote != null)
+                        {
+                            OnQuote.DynamicInvoke(this, quote);
+                        }
+                        debug("Quote: ", quote);
+                    }
+                    else
+                    {
+                        debug("Non-quote message: ", stringResult.ToString());
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                trySelfHeal();
+                debug("Websocket closed!");
+                Console.Error.WriteLine("IntrinioRealtime | Websocket error: " + e);
+            }
+            finally
+            {
+                websocket.Dispose();
+            }
         }
 
         protected void trySelfHeal()
@@ -181,9 +209,17 @@ namespace Intrinio_Realtime
                 selfHealTimer.Close();
             }
 
-            this.selfHealTimer = new System.Timers.Timer(time.TotalMilliseconds);
-            heartbeatTimer.Elapsed += (t, e) => connect(true);
-            heartbeatTimer.AutoReset = false;
+            if (time.TotalMilliseconds != 0)
+            {
+                this.selfHealTimer = new System.Timers.Timer(time.TotalMilliseconds);
+                selfHealTimer.Elapsed += (t, e) => connect(true);
+                selfHealTimer.AutoReset = false;
+                selfHealTimer.Start();
+            }
+            else
+            {
+                connect(true);
+            }
         }
 
 
@@ -200,29 +236,31 @@ namespace Intrinio_Realtime
             }
         }
 
-        protected void rejoinChannels()
+        protected async Task rejoinChannels()
         {
             foreach (var entry in this.channels)
             {
-                this.websocket.Send(Newtonsoft.Json.JsonConvert.SerializeObject(new IntrinioMessage()
+                var message = new IntrinioMessage()
                 {
                     Topic = this.parseTopic(entry.Key),
                     Event = "phx_join"
-                }));
+                };
+
+                await sendMessage(message, CancellationToken.None);
 
                 this.debug("Rejoined channel: ", entry.Key);
             }
         }
 
-        protected void heartbeat()
+        protected async void heartbeat()
         {
-            lock (this.connectionLock)
+            if (this.connected)
             {
-                this.websocket.Send(Newtonsoft.Json.JsonConvert.SerializeObject(new IntrinioMessage()
+                await this.sendMessage(new IntrinioMessage()
                 {
                     Topic = "phoenix",
                     Event = "heartbeat"
-                }));
+                }, CancellationToken.None);
             }
         }
 
@@ -291,15 +329,44 @@ namespace Intrinio_Realtime
             }
         }
 
-        protected void error(Exception e)
+        protected void error(Exception e, bool doThow = true)
         {
-            OnError.DynamicInvoke(e);
-            throw e;
+            if (OnError != null)
+            {
+                OnError.DynamicInvoke(this, e);
+            }
+
+            if (doThow)
+            {
+                throw e;
+            }
         }
 
         private System.Net.Http.Headers.AuthenticationHeaderValue getAuthenticationHeader()
         {
             return new System.Net.Http.Headers.AuthenticationHeaderValue("Basic", Convert.ToBase64String(Encoding.Default.GetBytes($"{options.username}:{options.password}")));
+        }
+
+        protected async Task sendMessage<T>(IntrinioMessage<T> message, CancellationToken _cancellationToken)
+        {
+            var messageString = Newtonsoft.Json.JsonConvert.SerializeObject(message);
+
+            var messageBuffer = Encoding.UTF8.GetBytes(messageString);
+            var messagesCount = (int)Math.Ceiling((double)messageBuffer.Length / bufferSize);
+
+            for (var i = 0; i < messagesCount; i++)
+            {
+                var offset = (bufferSize * i);
+                var count = bufferSize;
+                var lastMessage = ((i + 1) == messagesCount);
+
+                if ((count * (i + 1)) > messageBuffer.Length)
+                {
+                    count = messageBuffer.Length - offset;
+                }
+
+                await websocket.SendAsync(new ArraySegment<byte>(messageBuffer, offset, count), WebSocketMessageType.Text, lastMessage, _cancellationToken);
+            }
         }
 
         public void Dispose()
@@ -313,47 +380,45 @@ namespace Intrinio_Realtime
             selfHealTimer?.Stop();
             selfHealTimer?.Close();
 
-            this.websocket.Close(WS_CLOSE_REASON_USER, "User terminated");
+            this.websocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "User terminated", CancellationToken.None);
         }
 
-        public IObservable<Quote> join(params string[] args)
+        public async Task<IObservable<Quote>> join(params string[] args)
         {
             var channels = this.parseChannels(args);
 
-            lock (connectionLock)
+            foreach (var channel in channels)
             {
-                foreach (var channel in channels)
+                this.channels[channel] = true;
+                if (this.websocket != null)
                 {
-                    this.channels[channel] = true;
-                    this.websocket.Send(Newtonsoft.Json.JsonConvert.SerializeObject(new IntrinioMessage()
+                    await this.sendMessage(new IntrinioMessage()
                     {
                         Topic = this.parseTopic(channel),
                         Event = "phx_join"
-                    }));
+                    }, CancellationToken.None);
                     this.debug("Joined channel: ", channel);
                 }
             }
 
+
             return QuoteObservable.Where(quote => channels.Contains(quote.Ticker));
         }
 
-        public void leave(params string[] args)
+        public async void leave(params string[] args)
         {
             var channels = this.parseChannels(args);
 
-            lock (connectionLock)
+            foreach (var channel in channels)
             {
-                foreach (var channel in channels)
+                this.channels.Remove(channel);
+                await this.sendMessage(new IntrinioMessage()
                 {
-                    this.channels.Remove(channel);
-                    this.websocket.Send(Newtonsoft.Json.JsonConvert.SerializeObject(new IntrinioMessage()
-                    {
-                        Topic = this.parseTopic(channel),
-                        Event = "phx_leave"
-                    }));
+                    Topic = this.parseTopic(channel),
+                    Event = "phx_leave"
+                }, CancellationToken.None);
 
-                    this.debug("Left channel: ", channel);
-                }
+                this.debug("Left channel: ", channel);
             }
         }
 
@@ -371,7 +436,10 @@ namespace Intrinio_Realtime
         {
             get
             {
-                return Observable.FromEventPattern<Quote>(this, "OnQuote").Select((e) => e.EventArgs);
+                return Observable.FromEventPattern<Quote>(
+                    (ev) => this.OnQuote += ev,
+                    (ev) => this.OnQuote -= ev
+                    ).Select((e) => e.EventArgs);
             }
         }
 
@@ -379,7 +447,7 @@ namespace Intrinio_Realtime
         {
             get
             {
-                return Observable.FromEventPattern<Exception>(this, "OnError").Select((e) => e.EventArgs);
+                return Observable.FromEventPattern<Exception>((ev) => this.OnError += ev, (ev) => this.OnError -= ev).Select((e) => e.EventArgs);
             }
         }
 

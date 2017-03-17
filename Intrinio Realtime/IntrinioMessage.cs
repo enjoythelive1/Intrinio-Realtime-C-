@@ -6,7 +6,7 @@ using System.Threading.Tasks;
 
 namespace Intrinio_Realtime
 {
-    class IntrinioMessage<T>
+    public class IntrinioMessage<T>
     {
         public class MessageType
         {
