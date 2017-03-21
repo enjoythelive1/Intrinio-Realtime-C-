@@ -13,7 +13,7 @@ namespace Intrinio_Realtime_Test
         [TestMethod]
         public async Task CanConnectToTicker()
         {
-            var intrinioRealtime = new Intrinio_Realtime.IntrinioRealtime("fe0560fe47150ed7c28f361b0dd24c30", "7907ac944e04504d9ea2a6ef1f94b837", true);
+            var intrinioRealtime = new IntrinioRealtime.IntrinioRealtime("API USENAME HERE", "API PASSWORD HERE", true);
 
             var observable = await intrinioRealtime.join("AAPL");
             var quote = await observable.Timeout(new TimeSpan(0, 4, 0)).FirstAsync();

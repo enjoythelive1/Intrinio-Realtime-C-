@@ -76,9 +76,9 @@
     <Compile Include="Properties\AssemblyInfo.cs" />
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="..\Intrinio Realtime\Intrinio Realtime.csproj">
+    <ProjectReference Include="..\Intrinio Realtime\IntrinioRealtime.csproj">
       <Project>{93cbe3c7-82ef-4c0a-8429-199d0bdf2fde}</Project>
-      <Name>Intrinio Realtime</Name>
+      <Name>IntrinioRealtime</Name>
     </ProjectReference>
   </ItemGroup>
   <ItemGroup>

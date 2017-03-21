@@ -7,8 +7,8 @@
     <ProjectGuid>{93CBE3C7-82EF-4C0A-8429-199D0BDF2FDE}</ProjectGuid>
     <OutputType>Library</OutputType>
     <AppDesignerFolder>Properties</AppDesignerFolder>
-    <RootNamespace>Intrinio_Realtime</RootNamespace>
-    <AssemblyName>Intrinio Realtime</AssemblyName>
+    <RootNamespace>IntrinioRealtime</RootNamespace>
+    <AssemblyName>IntrinioRealtime</AssemblyName>
     <TargetFrameworkVersion>v4.5</TargetFrameworkVersion>
     <FileAlignment>512</FileAlignment>
     <TargetFrameworkProfile />
@@ -33,8 +33,8 @@
     <Prefer32Bit>false</Prefer32Bit>
   </PropertyGroup>
   <ItemGroup>
-    <Reference Include="Newtonsoft.Json, Version=9.0.0.0, Culture=neutral, PublicKeyToken=30ad4fe6b2a6aeed, processorArchitecture=MSIL">
-      <HintPath>..\packages\Newtonsoft.Json.9.0.1\lib\net45\Newtonsoft.Json.dll</HintPath>
+    <Reference Include="Newtonsoft.Json, Version=10.0.0.0, Culture=neutral, PublicKeyToken=30ad4fe6b2a6aeed, processorArchitecture=MSIL">
+      <HintPath>..\packages\Newtonsoft.Json.10.0.1\lib\net45\Newtonsoft.Json.dll</HintPath>
       <Private>True</Private>
     </Reference>
     <Reference Include="System" />
@@ -70,6 +70,7 @@
     <Compile Include="Quote.cs" />
   </ItemGroup>
   <ItemGroup>
+    <None Include="Intrinio Realtime.nuspec" />
     <None Include="packages.config" />
   </ItemGroup>
   <ItemGroup>

@@ -9,7 +9,7 @@ using System.Reactive.Linq;
 using System.Threading;
 using System.Net;
 
-namespace Intrinio_Realtime
+namespace IntrinioRealtime
 {
     public class IntrinioRealtime : IDisposable
     {

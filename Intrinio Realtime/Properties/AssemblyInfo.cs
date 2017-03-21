@@ -6,9 +6,9 @@ using System.Runtime.InteropServices;
 // conjunto de atributos. Cambie estos valores de atributo para modificar la información
 // asociada con un ensamblado.
 [assembly: AssemblyTitle("Intrinio Realtime")]
-[assembly: AssemblyDescription("")]
+[assembly: AssemblyDescription("Intirinio Realtime SDK for connecting to the IDX data feed")]
 [assembly: AssemblyConfiguration("")]
-[assembly: AssemblyCompany("")]
+[assembly: AssemblyCompany("Fausto A Guerrero")]
 [assembly: AssemblyProduct("Intrinio Realtime")]
 [assembly: AssemblyCopyright("Copyright ©  2017")]
 [assembly: AssemblyTrademark("")]

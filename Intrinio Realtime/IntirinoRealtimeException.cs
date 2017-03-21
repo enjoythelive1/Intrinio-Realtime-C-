@@ -1,7 +1,7 @@
 ﻿using System;
 using System.Runtime.Serialization;
 
-namespace Intrinio_Realtime
+namespace IntrinioRealtime
 {
     [Serializable]
     public class IntrinioRealtimeException : Exception
