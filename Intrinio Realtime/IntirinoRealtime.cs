@@ -26,6 +26,7 @@ namespace IntrinioRealtime
 
         protected string token;
         protected ClientWebSocket websocket;
+        protected CancellationTokenSource socketcancelation = new CancellationTokenSource();
         protected Dictionary<string, bool> channels = new Dictionary<string, bool>();
         protected IList<TimeSpan> selfHealBackoffs = new List<TimeSpan>(SELF_HEAL_BACKOFFS);
         protected System.Timers.Timer selfHealTimer;
@@ -70,10 +71,7 @@ namespace IntrinioRealtime
             {
                 await refreshToken();
                 await refreshWebsocket();
-                if (rejoin)
-                {
-                    stopSelfHeal();
-                }
+                stopSelfHeal();
                 await rejoinChannels();
             }
             catch (Exception e)
@@ -124,37 +122,39 @@ namespace IntrinioRealtime
         {
             this.debug("Establishing websocket...");
 
+            socketcancelation.Cancel();
 
-            if (this.websocket != null)
+            if (this.websocket != null && (websocket.State == WebSocketState.Connecting || websocket.State == WebSocketState.Open))
             {
                 await this.websocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "User terminated", CancellationToken.None);
             }
 
             var uriBuilder = new UriBuilder(WS_PROTOCOL, HOST, PORT, "/socket/websocket");
             uriBuilder.Query = $"vsn=1.0.0&token={Uri.EscapeDataString(this.token)}";
+            this.socketcancelation = new CancellationTokenSource();
             this.websocket = new ClientWebSocket();
 
-            await this.websocket.ConnectAsync(uriBuilder.Uri, CancellationToken.None);
+            await this.websocket.ConnectAsync(uriBuilder.Uri, this.socketcancelation.Token);
             this.debug("Websocket connected!");
-            this.recieveMessages();
+            this.recieveMessages(this.socketcancelation.Token);
         }
 
-        protected async void recieveMessages()
+        protected async void recieveMessages(CancellationToken cancelationToken)
         {
             try
             {
                 var buffer = new byte[bufferSize];
-                while (this.websocket.State == WebSocketState.Open)
+                while (this.websocket.State == WebSocketState.Open && !cancelationToken.IsCancellationRequested)
                 {
                     WebSocketReceiveResult result;
                     var stringResult = new StringBuilder();
                     do
                     {
-                        result = await websocket.ReceiveAsync(new ArraySegment<byte>(buffer), CancellationToken.None);
+                        result = await websocket.ReceiveAsync(new ArraySegment<byte>(buffer), cancelationToken);
 
                         if (result.MessageType == WebSocketMessageType.Close)
                         {
-                            await websocket.CloseAsync(WebSocketCloseStatus.NormalClosure, string.Empty, CancellationToken.None);
+                            await websocket.CloseAsync(WebSocketCloseStatus.NormalClosure, string.Empty, cancelationToken);
                             this.connected = false;
                         }
                         else
@@ -163,33 +163,45 @@ namespace IntrinioRealtime
                             stringResult.Append(str);
                         }
 
-                    } while (!result.EndOfMessage);
+                    } while (!result.EndOfMessage && !cancelationToken.IsCancellationRequested);
 
-                    IntrinioMessage<Quote> message = Newtonsoft.Json.JsonConvert.DeserializeObject<IntrinioMessage<Quote>>(stringResult.ToString());
-                    if (message.Event == IntrinioMessage<Quote>.MessageType.QUOTE)
+                    if (!cancelationToken.IsCancellationRequested)
                     {
-                        var quote = message.Payload;
-                        if (OnQuote != null)
+                        IntrinioMessage<Quote> message = Newtonsoft.Json.JsonConvert.DeserializeObject<IntrinioMessage<Quote>>(stringResult.ToString());
+                        if (message.Event == IntrinioMessage<Quote>.MessageType.QUOTE)
                         {
-                            OnQuote.DynamicInvoke(this, quote);
+                            var quote = message.Payload;
+                            if (OnQuote != null)
+                            {
+                                OnQuote.DynamicInvoke(this, quote);
+                            }
+                            debug("Quote: ", quote);
                         }
-                        debug("Quote: ", quote);
+                        else
+                        {
+                            debug("Non-quote message: ", stringResult.ToString());
+                        }
                     }
-                    else
-                    {
-                        debug("Non-quote message: ", stringResult.ToString());
-                    }
+                }
+            }
+            catch (WebSocketException e)
+            {
+                if (websocket.CloseStatus.HasValue && websocket.CloseStatus.Value != WebSocketCloseStatus.NormalClosure)
+                {
+                    socketcancelation.Cancel();
+                }
+                else
+                {
+                    trySelfHeal();
+                    debug("Websocket closed!");
+                    Console.WriteLine("IntrinioRealtime | Websocket error: " + e);
                 }
             }
             catch (Exception e)
             {
                 trySelfHeal();
                 debug("Websocket closed!");
-                Console.Error.WriteLine("IntrinioRealtime | Websocket error: " + e);
-            }
-            finally
-            {
-                websocket.Dispose();
+                Console.WriteLine("IntrinioRealtime | Websocket error: " + e);
             }
         }
 
@@ -380,6 +392,8 @@ namespace IntrinioRealtime
             selfHealTimer?.Stop();
             selfHealTimer?.Close();
 
+            socketcancelation.Cancel();
+
             this.websocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "User terminated", CancellationToken.None);
         }
 
@@ -390,7 +404,7 @@ namespace IntrinioRealtime
             foreach (var channel in channels)
             {
                 this.channels[channel] = true;
-                if (this.websocket != null)
+                if (this.websocket != null && websocket.State == WebSocketState.Open)
                 {
                     await this.sendMessage(new IntrinioMessage()
                     {
@@ -412,11 +426,14 @@ namespace IntrinioRealtime
             foreach (var channel in channels)
             {
                 this.channels.Remove(channel);
-                await this.sendMessage(new IntrinioMessage()
+                if (this.websocket != null && websocket.State == WebSocketState.Open)
                 {
-                    Topic = this.parseTopic(channel),
-                    Event = "phx_leave"
-                }, CancellationToken.None);
+                    await this.sendMessage(new IntrinioMessage()
+                    {
+                        Topic = this.parseTopic(channel),
+                        Event = "phx_leave"
+                    }, CancellationToken.None);
+                }
 
                 this.debug("Left channel: ", channel);
             }
@@ -448,6 +465,19 @@ namespace IntrinioRealtime
             get
             {
                 return Observable.FromEventPattern<Exception>((ev) => this.OnError += ev, (ev) => this.OnError -= ev).Select((e) => e.EventArgs);
+            }
+        }
+
+        protected CancellationTokenSource Socketcancelation
+        {
+            get
+            {
+                return socketcancelation;
+            }
+
+            set
+            {
+                socketcancelation = value;
             }
         }
 
